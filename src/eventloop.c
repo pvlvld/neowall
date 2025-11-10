@@ -756,6 +756,38 @@ void event_loop_run(struct neowall_state *state) {
             break;
         }
 
+        /* --- Decide which outputs should be redrawn now (throttling for shaders) --- */
+        pthread_rwlock_rdlock(&state->output_list_lock);
+        output = state->outputs;
+        while (output) {
+            output->needs_redraw = false;
+
+            /* Always redraw during transitions */
+            if (output->transition_start_time > 0 &&
+                output->config->transition != TRANSITION_NONE) {
+                output->needs_redraw = true;
+                output = output->next;
+                continue;
+            }
+
+            /* For shader wallpapers, only request redraw when interval elapsed */
+            if (output->config->type == WALLPAPER_SHADER &&
+                !output->shader_load_failed &&
+                output->live_shader_program != 0) {
+
+                uint64_t now_ms = get_time_ms();
+                int target_fps = output->config->shader_fps > 0 ? output->config->shader_fps : FPS_TARGET;
+                uint64_t interval_ms = 1000 / (uint64_t)target_fps;
+
+                if (output->last_frame_time == 0 || (now_ms - output->last_frame_time) >= interval_ms) {
+                    output->needs_redraw = true;
+                }
+            }
+
+            output = output->next;
+        }
+        pthread_rwlock_unlock(&state->output_list_lock);
+
         /* Render outputs that need updating */
         render_outputs(state);
         frame_count++;
@@ -771,24 +803,6 @@ void event_loop_run(struct neowall_state *state) {
 
             last_stats_time = current_time;
             frame_count = 0;
-        }
-
-        /* Keep redrawing during active transitions and for shader wallpapers */
-        output = state->outputs;
-        while (output) {
-            /* Keep redrawing during transitions */
-            if (output->transition_start_time > 0 && 
-                output->config->transition != TRANSITION_NONE) {
-                output->needs_redraw = true;
-            }
-            /* Keep redrawing for shader wallpapers (continuous animation) 
-             * but only if shader loaded successfully and hasn't failed */
-            if (output->config->type == WALLPAPER_SHADER && 
-                !output->shader_load_failed && 
-                output->live_shader_program != 0) {
-                output->needs_redraw = true;
-            }
-            output = output->next;
         }
         
         /* Throttle debug logging - only every 300 frames (~5 seconds at 60fps) */
